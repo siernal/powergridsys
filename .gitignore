@@ -1,0 +1,40 @@
+# ── Python ─────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.env
+*.env
+
+# Обученная ML-модель — генерируется на этапе build на Render, в репозитории не нужна
+backend/ml_models/*.pkl
+
+# ── Node / Vite (frontend) ──────────────────────────────────────────────────
+node_modules/
+frontend/dist/
+frontend/.vite/
+npm-debug.log*
+
+# ── IDE / OS ────────────────────────────────────────────────────────────────
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# ── Временные файлы LibreOffice/Office ──────────────────────────────────────
+.~lock.*#
+*.tmp
+~$*
+
+# ── Артефакты пояснительной записки (НЕ нужны для деплоя кода). ──────────────
+# Если хотите хранить документы ВКР в этом же репозитории — удалите эти строки.
+*.docx
+*.pdf
+page-*.jpg
+p-*.jpg
+er_diagram.png
+arch_diagram.png
+twin_demo.png
+REVERSE_ENGINEERING_REPORT.md

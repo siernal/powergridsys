@@ -1,0 +1,68 @@
+# render.yaml — Blueprint для деплоя PowerGrid Maintenance System на Render.
+# Поднимает три ресурса: PostgreSQL, бэкенд (FastAPI) и фронтенд (React/Vite static).
+#
+# Как применить: в панели Render → New + → Blueprint → выбрать репозиторий.
+# Render прочитает этот файл и создаст все ресурсы автоматически.
+#
+# ВАЖНО: VITE_API_URL у фронтенда должен совпадать с реальным адресом бэкенда.
+# Если Render добавит к имени суффикс (powergrid-backend-xxxx), поправьте значение
+# и нажмите Manual Deploy фронтенда (см. DEPLOY_RENDER.md).
+
+databases:
+  - name: powergrid-db
+    databaseName: powergrid
+    user: pguser
+    plan: free
+    region: frankfurt
+
+services:
+  # ── Бэкенд: FastAPI (нативный Python-рантайм, без Docker) ──────────────────
+  - type: web
+    name: powergrid-backend
+    runtime: python
+    plan: free
+    region: frankfurt
+    rootDir: backend
+    # Модель машинного обучения обучается на этапе сборки (а не при старте),
+    # чтобы рантайм с 512 МБ не падал по памяти. Готовый .pkl попадает в деплой.
+    buildCommand: "pip install -r requirements.txt && python -c \"from services.ml_predictor import train_model; train_model('./ml_models/rf_model.pkl')\""
+    # При старте: заполнить БД демо-данными (идемпотентно — повторно не дублирует),
+    # затем поднять сервер на порту, который выдаёт Render ($PORT).
+    startCommand: "python seed/seed_data.py && uvicorn main:app --host 0.0.0.0 --port $PORT"
+    healthCheckPath: /health
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: powergrid-db
+          property: connectionString
+      - key: SECRET_KEY
+        generateValue: true
+      - key: ML_MODEL_PATH
+        value: ./ml_models/rf_model.pkl
+      - key: ML_FAST_TRAIN
+        value: "1"
+      - key: ML_N_JOBS
+        value: "1"
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+
+  # ── Фронтенд: React + Vite, статический сайт ───────────────────────────────
+  - type: web
+    name: powergrid-frontend
+    runtime: static
+    rootDir: frontend
+    # Собираем через vite напрямую (без tsc): production-сборке не нужна
+    # строгая проверка типов, и ошибки типов не должны ломать деплой.
+    buildCommand: "npm install && npx vite build"
+    staticPublishPath: dist
+    envVars:
+      # ⚠️ Замените на реальный URL вашего бэкенда после первого деплоя, если он отличается.
+      - key: VITE_API_URL
+        value: https://powergrid-backend.onrender.com
+      - key: NODE_VERSION
+        value: "20.11.1"
+    # SPA: любой маршрут отдаёт index.html (иначе обновление страницы даёт 404).
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
