@@ -39,6 +39,44 @@ const CATEGORY_LABEL: Record<string, string> = {
   transformer: "Трансформатор", line: "Линия", substation: "Подстанция", cable: "Кабель",
 };
 
+// Человеко-читаемые подписи для факторов breakdown (категория → factor → label)
+const FACTOR_LABEL: Record<string, string> = {
+  age: "Возраст",
+  failures: "Накопленные отказы",
+  repairs: "Выполненные ремонты",
+  load: "Тепловая нагрузка изоляции",
+  overload_spike: "Острая перегрузка (>90%)",
+  maintenance_lag: "Давность диагностики",
+  temperature: "Экстремальная температура",
+  storm: "Штормовое воздействие",
+  weather_storm: "Погодные нагрузки (ветер, гололёд, гроза)",
+  switch_cycles: "Износ коммутационного ресурса",
+  load_marginal: "Токовая нагрузка проводов",
+  thermal_load: "Перегрев в грунте",
+  soil_cold: "Промерзание грунта",
+  criticality_amp: "Усиление по критичности",
+};
+
+// Какие параметры показывать в шапке twin-карточки в зависимости от категории
+const CATEGORY_PARAMS: Record<string, { label: string; key: "load" | "age_ratio"; suffix: string }[]> = {
+  transformer: [
+    { label: "Нагрузка масла",       key: "load",      suffix: " %" },
+    { label: "Выработка ресурса",    key: "age_ratio", suffix: "" },
+  ],
+  substation: [
+    { label: "Загрузка коммутации",  key: "load",      suffix: " %" },
+    { label: "Выработка ресурса",    key: "age_ratio", suffix: "" },
+  ],
+  line: [
+    { label: "Загрузка по току",     key: "load",      suffix: " %" },
+    { label: "Выработка ресурса",    key: "age_ratio", suffix: "" },
+  ],
+  cable: [
+    { label: "Тепловой режим",       key: "load",      suffix: " %" },
+    { label: "Выработка ресурса",    key: "age_ratio", suffix: "" },
+  ],
+};
+
 // Возможные модальные окна на странице
 type ModalKind =
   | null
@@ -169,10 +207,11 @@ export default function AssetDetailPage() {
         <StatCard label="Ремонтов" value={asset.repairs_count ?? 0} />
         <StatCard label="Дней без ТО" value={asset.days_since_maintenance?.toFixed(0) ?? "—"} />
         <StatCard label="Индекс состояния" value={asset.health_score?.toFixed(1) ?? "—"} accent={healthColor as any} hint="по цифровой копии" />
-        <StatCard label="Текущий риск" value={
+        <StatCard label="Риск отказа за 90 дней" value={
           asset.latest_risk_probability != null ?
             `${(asset.latest_risk_probability * 100).toFixed(1)}%` : "—"
-        } accent={asset.latest_risk_level === "high" ? "danger" :
+        } hint="прогноз на квартал"
+          accent={asset.latest_risk_level === "high" ? "danger" :
                   asset.latest_risk_level === "medium" ? "warning" : "success"} />
       </div>
 
@@ -259,7 +298,15 @@ export default function AssetDetailPage() {
                 <tbody>
                   <tr><th>Категория</th><td>{CATEGORY_LABEL[twin.category] || twin.category}</td></tr>
                   <tr><th>Возраст</th><td>{twin.age?.toFixed(1)} лет</td></tr>
-                  <tr><th>Текущая нагрузка</th><td>{twin.load?.toFixed(1) ?? "—"} %</td></tr>
+                  {/* Параметры, специфичные для категории объекта */}
+                  {(CATEGORY_PARAMS[twin.category] || CATEGORY_PARAMS.transformer).map((p) => {
+                    const val = twin[p.key];
+                    if (val == null) return null;
+                    const display = p.key === "age_ratio"
+                      ? `${(val * 100).toFixed(0)}% от норматива`
+                      : `${val.toFixed(1)}${p.suffix}`;
+                    return <tr key={p.key}><th>{p.label}</th><td>{display}</td></tr>;
+                  })}
                   <tr><th>Риск (цифр. копия)</th><td>{((twin.risk ?? 0) * 100).toFixed(1)}%</td></tr>
                   <tr>
                     <th>Зависимые объекты</th>
@@ -274,6 +321,46 @@ export default function AssetDetailPage() {
                   </tr>
                 </tbody>
               </table>
+
+              {/* ── Разложение факторов индекса ─────────────────────── */}
+              {twin.breakdown && Object.keys(twin.breakdown).length > 0 && (
+                <div style={{ marginTop: 16 }}>
+                  <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+                    Вклад факторов в индекс состояния
+                  </div>
+                  {(() => {
+                    const entries = Object.entries(twin.breakdown as Record<string, number>)
+                      .filter(([, v]) => v !== 0)
+                      .sort((a, b) => Math.abs(b[1]) - Math.abs(a[1]));
+                    const maxAbs = Math.max(...entries.map(([, v]) => Math.abs(v)), 1);
+                    return (
+                      <table className="table" style={{ fontSize: 13 }}>
+                        <tbody>
+                          {entries.map(([k, v]) => {
+                            const positive = v > 0;
+                            const width = (Math.abs(v) / maxAbs) * 100;
+                            return (
+                              <tr key={k}>
+                                <td style={{ width: "55%" }}>{FACTOR_LABEL[k] || k}</td>
+                                <td style={{ width: 60, textAlign: "right", fontWeight: 600,
+                                             color: positive ? "#15803d" : "#991b1b" }}>
+                                  {positive ? "+" : ""}{v.toFixed(1)}
+                                </td>
+                                <td>
+                                  <div style={{
+                                    width: `${width}%`, height: 10, borderRadius: 5,
+                                    background: positive ? "#86efac" : "#fca5a5",
+                                  }} />
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    );
+                  })()}
+                </div>
+              )}
             </>
           ) : (
             <div className="empty">

@@ -134,7 +134,9 @@ export default function RiskAnalytics() {
     <div>
       <h1>Прогноз отказов</h1>
       <p className="muted" style={{ marginTop: -8, marginBottom: 16 }}>
-        Прогнозирование вероятности отказа на основе ансамбля Random Forest + Gradient Boosting,
+        Прогноз вероятности отказа на горизонте{" "}
+        <strong>{metrics?.forecast_horizon_days ?? 90} дней</strong>{" "}
+        на основе ансамбля Random Forest + Gradient Boosting,
         обученного на 10 000 синтетических примерах, 19 признаках.
       </p>
 
@@ -158,6 +160,7 @@ export default function RiskAnalytics() {
       {/* ── Метрики модели ───────────────────────────────────────── */}
       <div className="stat-grid">
         <StatCard label="Версия модели" value={metrics?.model_version || "—"} />
+        <StatCard label="Горизонт прогноза" value={metrics?.forecast_horizon_days ?? 90} hint="дней" accent="success" />
         <StatCard label="ROC-AUC"       value={metrics?.roc_auc?.toFixed(3) || "—"} hint="на тестовой выборке" />
         <StatCard label="F1-macro"      value={metrics?.f1_macro?.toFixed(3) || "—"} />
         <StatCard label="Размер train"  value={metrics?.n_train ?? "—"} />
@@ -242,7 +245,7 @@ export default function RiskAnalytics() {
                   Регион{sortIcon("region")}
                 </th>
                 <th style={{ cursor: "pointer", whiteSpace: "nowrap" }} onClick={() => toggleSort("prob")}>
-                  Вероятность отказа{sortIcon("prob")}
+                  Вероятность отказа за {metrics?.forecast_horizon_days ?? 90} дней{sortIcon("prob")}
                 </th>
                 <th>Уровень риска</th>
                 <th style={{ cursor: "pointer" }} onClick={() => toggleSort("criticality")}>

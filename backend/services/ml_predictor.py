@@ -37,14 +37,32 @@ CATEGORY_LIFETIME = {
 
 # ─── Генерация обучающего датасета ───────────────────────────────────────────
 
-def generate_training_data(n_samples: int = 10_000) -> pd.DataFrame:
+DEFAULT_FORECAST_HORIZON_DAYS = 90  # квартал — стандартное окно ТОиР
+
+
+def generate_training_data(
+    n_samples: int = 10_000,
+    horizon_days: int = DEFAULT_FORECAST_HORIZON_DAYS,
+) -> pd.DataFrame:
     """
-    Синтетический датасет: чем старше объект, чем выше нагрузка и частота
-    отказов — тем выше вероятность следующего отказа.
-    Содержит 15 числовых признаков + категория.
+    Синтетический датасет для бинарной классификации:
+    «откажет ли объект в течение horizon_days дней?».
+
+    Логика: вычисляется балл деградации, далее он трактуется как годовая
+    интенсивность отказов (hazard rate) в логистической форме, и из неё
+    выводится вероятность отказа в окне длительностью horizon_days.
+
+    Чем больше horizon_days — тем выше доля положительных примеров и тем
+    проще модели уловить долгосрочные тренды. Чем короче — тем ближе
+    задача к классической «авария в ближайший месяц».
     """
     np.random.seed(42)
     rng = np.random.default_rng(42)
+    # Доля года, на которую делаем прогноз. 1.0 = весь год, 0.25 ≈ 90 дней.
+    horizon_factor = horizon_days / 365.0
+    # Логарифм горизонта смещает базовую вероятность: при коротком окне
+    # вероятность ниже, при длинном — выше.
+    horizon_bias = math.log(horizon_factor) * 0.9
 
     categories = ["transformer", "line", "substation", "cable"]
     cat_risk_bias = {"transformer": 0.10, "line": 0.00, "substation": 0.15, "cable": 0.05}
@@ -90,7 +108,8 @@ def generate_training_data(n_samples: int = 10_000) -> pd.DataFrame:
             + 0.250 * age_ratio
             + 0.050 * max(0, load_trend)
             + rng.normal(0, 0.15)   # шум
-            - 3.2                   # сдвиг (~25 % позитивных)
+            - 3.2                   # сдвиг (~25 % позитивных при годовом окне)
+            + horizon_bias          # коррекция на длительность прогнозного окна
         )
         p = 1 / (1 + math.exp(-score))
         label = int(rng.binomial(1, p))
@@ -142,7 +161,14 @@ def build_feature_matrix(df: pd.DataFrame) -> pd.DataFrame:
 
 # ─── Обучение модели ─────────────────────────────────────────────────────────
 
-def train_model(model_path: str) -> dict:
+def train_model(
+    model_path: str,
+    horizon_days: int = DEFAULT_FORECAST_HORIZON_DAYS,
+) -> dict:
+    """
+    Обучить модель прогнозирования отказов на горизонте horizon_days дней.
+    Горизонт по умолчанию — 90 дней (квартал, типовой цикл планирования ТОиР).
+    """
     # Обучение можно облегчить через переменные окружения — это нужно для деплоя
     # на хостинге с малым объёмом памяти (например, Render free-tier, 512 МБ),
     # где полный GridSearchCV с n_jobs=-1 не помещается в память.
@@ -150,7 +176,7 @@ def train_model(model_path: str) -> dict:
     n_jobs = int(os.getenv("ML_N_JOBS", "-1"))
     n_samples = 3_000 if fast else 10_000
 
-    df = generate_training_data(n_samples)
+    df = generate_training_data(n_samples, horizon_days=horizon_days)
     X = build_feature_matrix(df)
     y = df["failure_label"]
 
@@ -214,25 +240,28 @@ def train_model(model_path: str) -> dict:
     feat_imp = list(zip(list(X.columns), rf_clf.feature_importances_.tolist()))
 
     metrics = {
-        "roc_auc":         round(auc, 4),
-        "f1_macro":        round(f1, 4),
-        "n_train":         len(X_train),
-        "n_test":          len(X_test),
-        "positive_rate":   round(float(y.mean()), 4),
-        "feature_columns": list(X.columns),
-        "model_version":   MODEL_VERSION,
-        "trained_at":      datetime.utcnow().isoformat(),
-        "best_params":     search.best_params_,
+        "roc_auc":                round(auc, 4),
+        "f1_macro":                round(f1, 4),
+        "n_train":                 len(X_train),
+        "n_test":                  len(X_test),
+        "positive_rate":           round(float(y.mean()), 4),
+        "feature_columns":         list(X.columns),
+        "model_version":           MODEL_VERSION,
+        "trained_at":              datetime.utcnow().isoformat(),
+        "best_params":             search.best_params_,
+        "forecast_horizon_days":   horizon_days,
     }
-    logger.info(f"Model trained: AUC={auc:.4f}, F1={f1:.4f}")
+    logger.info(f"Model trained: AUC={auc:.4f}, F1={f1:.4f}, "
+                f"horizon={horizon_days} days")
 
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     with open(model_path, "wb") as f:
         pickle.dump({
-            "model":               best,
-            "feature_columns":     list(X.columns),
-            "feature_importances": feat_imp,
-            "metrics":             metrics,
+            "model":                 best,
+            "feature_columns":       list(X.columns),
+            "feature_importances":   feat_imp,
+            "metrics":               metrics,
+            "forecast_horizon_days": horizon_days,
         }, f)
 
     return metrics
@@ -300,15 +329,23 @@ class FailurePredictor:
 
         feat_imp = self._bundle.get("feature_importances", [])
         top_features = sorted(feat_imp, key=lambda x: x[1], reverse=True)[:5]
+        horizon = self._bundle.get("forecast_horizon_days", DEFAULT_FORECAST_HORIZON_DAYS)
 
         return {
-            "risk_probability": round(prob, 4),
-            "risk_percent":     round(prob * 100, 1),
-            "risk_level":       level,
-            "top_features":     [{"name": n, "importance": round(v, 4)} for n, v in top_features],
-            "model_version":    MODEL_VERSION,
+            "risk_probability":      round(prob, 4),
+            "risk_percent":          round(prob * 100, 1),
+            "risk_level":            level,
+            "forecast_horizon_days": horizon,
+            "top_features":          [{"name": n, "importance": round(v, 4)} for n, v in top_features],
+            "model_version":         MODEL_VERSION,
         }
 
     def get_metrics(self) -> dict:
         self._load()
-        return self._bundle.get("metrics", {})
+        m = dict(self._bundle.get("metrics", {}))
+        # Подстраховка для старых .pkl, где горизонт не сохранялся в метриках
+        m.setdefault(
+            "forecast_horizon_days",
+            self._bundle.get("forecast_horizon_days", DEFAULT_FORECAST_HORIZON_DAYS),
+        )
+        return m

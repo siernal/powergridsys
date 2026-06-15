@@ -562,6 +562,7 @@ def calculate_risk(asset_id: int, db: Session = Depends(get_db)):
         asset_id=asset_id,
         risk_probability=prediction["risk_probability"],
         risk_level=prediction["risk_level"],
+        forecast_horizon_days=prediction.get("forecast_horizon_days", 90),
         feature_snapshot={**features, **prediction},
         model_version=prediction["model_version"],
     )
@@ -591,6 +592,7 @@ def calculate_all_risks(db: Session = Depends(get_db)):
             asset_id=asset.id,
             risk_probability=prediction["risk_probability"],
             risk_level=prediction["risk_level"],
+            forecast_horizon_days=prediction.get("forecast_horizon_days", 90),
             feature_snapshot=features,
             model_version=prediction["model_version"],
         )

@@ -79,8 +79,9 @@ export interface RiskScore {
   id: number;
   asset_id: number;
   calculated_at: string;
-  risk_probability: number;     // вероятность отказа 0..1
+  risk_probability: number;     // вероятность отказа в течение forecast_horizon_days
   risk_level: "low" | "medium" | "high" | string;
+  forecast_horizon_days?: number | null;   // горизонт прогноза, дней (по умолчанию 90)
   feature_snapshot?: Record<string, unknown> | null;  // снимок признаков для объяснимости
   model_version?: string | null;
 }
@@ -132,6 +133,7 @@ export interface ModelMetrics {
   n_train?: number;              // размер обучающей выборки
   n_test?: number;               // размер тестовой выборки
   positive_rate?: number;        // доля положительных примеров
+  forecast_horizon_days?: number; // горизонт прогноза, дней (по умолчанию 90)
   feature_columns?: string[];    // список признаков (отображаются как бейджи)
   model_version?: string;        // версия модели (например «2.0»)
   trained_at?: string;           // ISO datetime момента обучения

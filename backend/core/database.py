@@ -54,6 +54,7 @@ def _auto_migrate():
     """
     pending = [
         ("assets", "image_url", "VARCHAR(500)"),
+        ("risk_scores", "forecast_horizon_days", "INTEGER DEFAULT 90"),
     ]
     inspector = inspect(engine)
     existing_tables = set(inspector.get_table_names())

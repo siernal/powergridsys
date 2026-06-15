@@ -163,13 +163,14 @@ class RiskScore(Base):
     """
     __tablename__ = "risk_scores"
 
-    id                = Column(Integer, primary_key=True)
-    asset_id          = Column(Integer, ForeignKey("assets.id"))
-    calculated_at     = Column(DateTime, default=datetime.utcnow)
-    risk_probability  = Column(Float)          # вероятность отказа 0..1
-    risk_level        = Column(String(10))     # low / medium / high
-    feature_snapshot  = Column(JSON)           # признаки на момент расчёта
-    model_version     = Column(String(20), default="1.0")
+    id                     = Column(Integer, primary_key=True)
+    asset_id               = Column(Integer, ForeignKey("assets.id"))
+    calculated_at          = Column(DateTime, default=datetime.utcnow)
+    risk_probability       = Column(Float)          # вероятность отказа 0..1
+    risk_level             = Column(String(10))     # low / medium / high
+    forecast_horizon_days  = Column(Integer, default=90)   # горизонт прогноза, дней
+    feature_snapshot       = Column(JSON)            # признаки на момент расчёта
+    model_version          = Column(String(20), default="1.0")
 
     asset = relationship("Asset", back_populates="risk_scores")
 

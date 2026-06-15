@@ -69,7 +69,7 @@ export default function Dashboard() {
         <StatCard label="Активных"             value={summary.active}          accent="success" />
         <StatCard label="В обслуживании"       value={summary.in_maintenance} />
         <StatCard label="В аварии"             value={summary.failed}          accent="danger" />
-        <StatCard label="Высокий риск"         value={summary.high_risk_count} accent="danger"
+        <StatCard label="Высокий риск (90 дн.)" value={summary.high_risk_count} accent="danger"
                   hint={`+${summary.medium_risk_count} среднего риска`} />
         <StatCard label="Индекс состояния"     value={summary.avg_health_score?.toFixed(1) ?? "—"}
                   hint="по цифровой копии" />

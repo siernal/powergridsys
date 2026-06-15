@@ -89,13 +89,16 @@ def generate_plan(db: Session, horizon_days: int = 180) -> List[dict]:
         risk = item["risk_prob"]
         priority = item["priority"]
 
-        # Окно планирования по уровню риска
+        # Окно планирования по уровню риска.
+        # Модель прогнозирует вероятность отказа на горизонте 90 дней;
+        # окна выбраны так, что для каждого уровня риска работа
+        # планируется заметно раньше прогнозируемого отказа.
         if risk >= 0.60:
-            window_start, window_end = 1, 30
+            window_start, window_end = 1, 30        # высокий риск → срочный осмотр в течение месяца
         elif risk >= 0.30:
-            window_start, window_end = 15, 90
+            window_start, window_end = 15, 90       # средний риск → плановое ТО в пределах горизонта
         else:
-            window_start, window_end = 60, 180
+            window_start, window_end = 60, 180      # низкий риск → регламентный осмотр позже горизонта
 
         # Найти первый доступный день
         plan_day = None

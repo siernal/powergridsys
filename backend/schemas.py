@@ -229,9 +229,10 @@ class RiskScoreOut(BaseModel):
     id: int
     asset_id: int
     calculated_at: datetime
-    risk_probability: float      # 0..1
-    risk_level: str              # low/medium/high
-    feature_snapshot: Optional[Any]   # JSON с признаками на момент расчёта
+    risk_probability: float            # 0..1
+    risk_level: str                    # low/medium/high
+    forecast_horizon_days: Optional[int] = 90    # горизонт прогноза, дней
+    feature_snapshot: Optional[Any]    # JSON с признаками на момент расчёта
     model_version: Optional[str]
 
     class Config:
