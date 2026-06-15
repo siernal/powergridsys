@@ -58,6 +58,7 @@ class AssetCreate(BaseModel):
     voltage_class: Optional[str] = None
     criticality: float = Field(default=0.5, ge=0, le=1)  # ge/le = ограничения диапазона
     status: str = "active"
+    image_url: Optional[str] = None                       # URL/путь к изображению объекта
 
 
 class AssetUpdate(BaseModel):
@@ -74,6 +75,7 @@ class AssetUpdate(BaseModel):
     voltage_class: Optional[str] = None
     criticality: Optional[float] = Field(default=None, ge=0, le=1)
     status: Optional[str] = None
+    image_url: Optional[str] = None
 
 
 class AssetOut(BaseModel):
@@ -89,6 +91,7 @@ class AssetOut(BaseModel):
     voltage_class: Optional[str]
     criticality: float
     status: str
+    image_url: Optional[str] = None
     created_at: datetime
 
     class Config:

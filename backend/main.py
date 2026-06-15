@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
 
 from core.config import get_settings
 from core.database import init_db, SessionLocal
@@ -106,6 +107,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# Статические файлы (загруженные изображения объектов и пр.).
+# Создаём директорию, если её нет, чтобы StaticFiles не падал.
+os.makedirs("static/assets", exist_ok=True)
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
 # Регистрация роутеров
 app.include_router(auth_router)

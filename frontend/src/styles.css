@@ -237,6 +237,11 @@ h3 { font-size: 16px; font-weight: 600; }
 .badge--failed        { background: #fee2e2; color: #991b1b; }
 .badge--decommissioned{ background: #e5e7eb; color: #374151; }
 
+/* Типы ремонтов */
+.badge--planned   { background: #dcfce7; color: #166534; }
+.badge--emergency { background: #fee2e2; color: #991b1b; }
+.badge--capital   { background: #dbeafe; color: #1e40af; }
+
 /* ── Inputs / Filters ─────────────────────────────────────────────────────── */
 
 .filters {

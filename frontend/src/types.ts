@@ -23,6 +23,7 @@ export interface Asset {
   voltage_class?: string | null;      // «10кВ» / «35кВ» / «110кВ» / «0.4кВ»
   criticality: number;                // итоговая критичность 0..1
   status: "active" | "maintenance" | "failed" | "decommissioned" | string;
+  image_url?: string | null;          // относительный путь к изображению объекта (/static/assets/…)
   created_at: string;
 }
 

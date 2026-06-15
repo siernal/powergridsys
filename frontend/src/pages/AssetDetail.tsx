@@ -11,6 +11,7 @@ import {
   getAsset, getAssetInspections, getAssetRepairs, getAssetFailures,
   calculateRisk, getTwinNode,
   deleteAsset, deleteInspection, deleteRepair, deleteFailure,
+  uploadAssetImage, deleteAssetImage, staticBaseUrl,
 } from "../api/client";
 import type { AssetDetail, Inspection, Repair, Failure } from "../types";
 import RiskBadge from "../components/RiskBadge";
@@ -59,9 +60,28 @@ export default function AssetDetailPage() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [calc, setCalc] = useState(false);
+  const [uploadingImg, setUploadingImg] = useState(false);
 
   // Единое состояние модалок — null = закрыто
   const [modal, setModal] = useState<ModalKind>(null);
+
+  // ─── Загрузка / удаление изображения объекта ──────────────────
+  const onUploadImage = async (file: File) => {
+    setUploadingImg(true);
+    try {
+      await uploadAssetImage(assetId, file);
+      loadAll();
+    } catch (e: any) {
+      alert(e?.response?.data?.detail || e?.message || "Ошибка загрузки изображения");
+    } finally {
+      setUploadingImg(false);
+    }
+  };
+  const onDeleteImage = async () => {
+    if (!confirm("Удалить изображение объекта?")) return;
+    try { await deleteAssetImage(assetId); loadAll(); }
+    catch (e: any) { alert(e?.response?.data?.detail || e?.message || "Ошибка"); }
+  };
 
   const loadAll = () => {
     setLoading(true);
@@ -154,6 +174,52 @@ export default function AssetDetailPage() {
             `${(asset.latest_risk_probability * 100).toFixed(1)}%` : "—"
         } accent={asset.latest_risk_level === "high" ? "danger" :
                   asset.latest_risk_level === "medium" ? "warning" : "success"} />
+      </div>
+
+      {/* ── Изображение объекта ──────────────────────────────── */}
+      <div className="card">
+        <div className="row-between" style={{ marginBottom: 8 }}>
+          <div className="card__title" style={{ margin: 0 }}>Изображение объекта</div>
+          <div className="row" style={{ gap: 8 }}>
+            <label className="btn btn--ghost btn--sm" style={{ cursor: "pointer" }}>
+              {uploadingImg ? <><Spinner /> Загрузка...</> : (asset.image_url ? "🔄 Заменить" : "📷 Загрузить")}
+              <input
+                type="file"
+                accept="image/png, image/jpeg, image/jpg, image/webp, image/gif"
+                style={{ display: "none" }}
+                disabled={uploadingImg}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  if (f) onUploadImage(f);
+                  e.target.value = "";
+                }}
+              />
+            </label>
+            {asset.image_url && (
+              <button className="btn btn--ghost btn--sm" onClick={onDeleteImage}>🗑 Удалить</button>
+            )}
+          </div>
+        </div>
+        {asset.image_url ? (
+          <div style={{ textAlign: "center" }}>
+            <img
+              src={staticBaseUrl + asset.image_url}
+              alt={asset.name}
+              style={{
+                maxWidth: "100%",
+                maxHeight: 420,
+                borderRadius: 8,
+                border: "1px solid #e5e7eb",
+                objectFit: "contain",
+              }}
+            />
+          </div>
+        ) : (
+          <div className="empty">
+            Изображение не загружено.<br />
+            Поддерживаются форматы PNG, JPG, JPEG, WEBP, GIF.
+          </div>
+        )}
       </div>
 
       {/* ── Параметры объекта + цифровая копия ────────────────── */}

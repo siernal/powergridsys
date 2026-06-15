@@ -17,11 +17,12 @@ routers.py — все REST API роутеры приложения.
 import os
 import asyncio
 import logging
+import shutil
 from datetime import datetime, date, timedelta
 from typing import List, Optional
 
 import json
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, UploadFile, File, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session, joinedload
 from sqlalchemy import func, desc
@@ -197,6 +198,63 @@ def update_status(asset_id: int, status: str, db: Session = Depends(get_db)):
     return {"ok": True, "status": status}
 
 
+@assets_router.post("/{asset_id}/image")
+def upload_asset_image(
+    asset_id: int,
+    file: UploadFile = File(...),
+    db: Session = Depends(get_db),
+):
+    """Загрузить изображение объекта.
+
+    Изображение сохраняется в директорию static/assets/, доступную по
+    относительному URL /static/assets/<имя>. Поле image_url объекта
+    обновляется этим URL и возвращается клиенту.
+    """
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(404, "Объект не найден")
+
+    # Допустимые расширения
+    ext = os.path.splitext(file.filename or "")[1].lower()
+    if ext not in {".png", ".jpg", ".jpeg", ".webp", ".gif"}:
+        raise HTTPException(
+            400,
+            "Поддерживаются только изображения PNG, JPG, JPEG, WEBP, GIF"
+        )
+
+    # Сохранение файла
+    upload_dir = "static/assets"
+    os.makedirs(upload_dir, exist_ok=True)
+    filename = f"{asset_id}_{int(datetime.utcnow().timestamp())}{ext}"
+    file_path = os.path.join(upload_dir, filename)
+    with open(file_path, "wb") as buf:
+        shutil.copyfileobj(file.file, buf)
+
+    # Обновление URL в БД
+    asset.image_url = f"/static/assets/{filename}"
+    db.commit()
+    db.refresh(asset)
+    return {"image_url": asset.image_url}
+
+
+@assets_router.delete("/{asset_id}/image", status_code=204)
+def delete_asset_image(asset_id: int, db: Session = Depends(get_db)):
+    """Удалить изображение объекта (сбросить image_url и удалить файл)."""
+    asset = db.query(Asset).filter(Asset.id == asset_id).first()
+    if not asset:
+        raise HTTPException(404, "Объект не найден")
+    if asset.image_url:
+        path = asset.image_url.lstrip("/")
+        if os.path.exists(path):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+        asset.image_url = None
+        db.commit()
+    return None
+
+
 @assets_router.put("/{asset_id}", response_model=AssetOut)
 def update_asset(asset_id: int, body: AssetUpdate, db: Session = Depends(get_db)):
     """Полное редактирование объекта.
@@ -311,6 +369,18 @@ def add_repair(body: RepairCreate, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(repair)
     return repair
+
+
+@repairs_router.get("", response_model=List[RepairOut])
+def list_repairs(skip: int = 0, limit: int = 100, db: Session = Depends(get_db)):
+    """Список всех ремонтов (от новых к старым), с пагинацией."""
+    return (
+        db.query(Repair)
+        .order_by(desc(Repair.started_at))
+        .offset(skip)
+        .limit(limit)
+        .all()
+    )
 
 
 @repairs_router.get("/asset/{asset_id}", response_model=List[RepairOut])

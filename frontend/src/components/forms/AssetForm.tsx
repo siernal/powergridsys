@@ -3,7 +3,7 @@
 // иначе создание (POST). Список типов загружается из API один раз.
 
 import { useEffect, useState } from "react";
-import { listAssetTypes, createAsset, updateAsset } from "../../api/client";
+import { listAssetTypes, createAsset, updateAsset, uploadAssetImage, staticBaseUrl } from "../../api/client";
 import type { Asset } from "../../types";
 import { Spinner } from "../Loading";
 
@@ -38,6 +38,12 @@ export default function AssetForm({ initial, onDone, onCancel }: Props) {
   const [types, setTypes] = useState<{ id: number; name: string; category: string }[]>([]);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  // Файл изображения, выбранный пользователем (загружается после сохранения объекта)
+  const [imageFile, setImageFile] = useState<File | null>(null);
+  // Превью выбранного файла или ранее загруженного изображения
+  const [imagePreview, setImagePreview] = useState<string | null>(
+    initial?.image_url ? staticBaseUrl + initial.image_url : null,
+  );
 
   // Загружаем справочник типов при монтировании
   useEffect(() => {
@@ -71,8 +77,25 @@ export default function AssetForm({ initial, onDone, onCancel }: Props) {
 
     setBusy(true);
     try {
-      if (isEdit && initial) await updateAsset(initial.id, body);
-      else await createAsset(body);
+      let savedId: number;
+      if (isEdit && initial) {
+        await updateAsset(initial.id, body);
+        savedId = initial.id;
+      } else {
+        const created = await createAsset(body);
+        savedId = created.id;
+      }
+      // Если пользователь выбрал файл изображения — загружаем его сразу после сохранения
+      if (imageFile) {
+        try {
+          await uploadAssetImage(savedId, imageFile);
+        } catch (imgErr: any) {
+          setErr("Объект сохранён, но не удалось загрузить изображение: "
+            + (imgErr?.response?.data?.detail || imgErr?.message || "ошибка"));
+          setBusy(false);
+          return;
+        }
+      }
       onDone();
     } catch (e: any) {
       // FastAPI вернёт detail в теле ответа
@@ -80,6 +103,14 @@ export default function AssetForm({ initial, onDone, onCancel }: Props) {
     } finally {
       setBusy(false);
     }
+  };
+
+  // Локальное превью при выборе файла (через FileReader / URL.createObjectURL)
+  const onPickFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const f = e.target.files?.[0];
+    if (!f) return;
+    setImageFile(f);
+    setImagePreview(URL.createObjectURL(f));
   };
 
   return (
@@ -146,6 +177,40 @@ export default function AssetForm({ initial, onDone, onCancel }: Props) {
           <label>Долгота (WGS-84)</label>
           <input className="input" type="number" step="0.000001" value={lon}
                  onChange={(e) => setLon(e.target.value)} placeholder="например, 37.618423" />
+        </div>
+      </div>
+
+      {/* ── Изображение объекта ─────────────────────────────────── */}
+      <div className="form__row" style={{ marginTop: 12 }}>
+        <label>Изображение объекта</label>
+        <div style={{ display: "flex", gap: 12, alignItems: "flex-start" }}>
+          {imagePreview ? (
+            <img
+              src={imagePreview}
+              alt="превью"
+              style={{ width: 96, height: 96, objectFit: "cover",
+                       borderRadius: 8, border: "1px solid #e5e7eb" }}
+            />
+          ) : (
+            <div style={{ width: 96, height: 96, borderRadius: 8,
+                          background: "#f3f4f6", border: "1px dashed #d1d5db",
+                          display: "flex", alignItems: "center", justifyContent: "center",
+                          color: "#9ca3af", fontSize: 28 }}>📷</div>
+          )}
+          <div style={{ flex: 1 }}>
+            <input
+              type="file"
+              accept="image/png, image/jpeg, image/jpg, image/webp, image/gif"
+              onChange={onPickFile}
+              disabled={busy}
+            />
+            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+              PNG, JPG, JPEG, WEBP, GIF.{" "}
+              {imageFile
+                ? `Будет загружено после сохранения: ${imageFile.name}`
+                : "Файл загрузится сразу после сохранения объекта."}
+            </div>
+          </div>
         </div>
       </div>
 

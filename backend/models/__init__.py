@@ -76,6 +76,7 @@ class Asset(Base):
     criticality     = Column(Float, default=0.5)                 # итоговая критичность 0..1
     status          = Column(String(30), default="active")       # active/maintenance/failed/decommissioned
     parent_asset_id = Column(Integer, ForeignKey("assets.id"), nullable=True)  # иерархия
+    image_url       = Column(String(500), nullable=True)          # URL/путь к загруженному изображению
     created_at      = Column(DateTime, default=datetime.utcnow)
 
     asset_type        = relationship("AssetType", back_populates="assets")

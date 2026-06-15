@@ -62,6 +62,25 @@ export const updateAsset = (id: number, body: Partial<Asset>) =>
 export const deleteAsset = (id: number) =>
   http.delete<void>(`/api/assets/${id}`).then((r) => r.data);
 
+/** Загрузить изображение объекта (multipart/form-data) */
+export const uploadAssetImage = (id: number, file: File) => {
+  const fd = new FormData();
+  fd.append("file", file);
+  return http
+    .post<{ image_url: string }>(`/api/assets/${id}/image`, fd, {
+      headers: { "Content-Type": "multipart/form-data" },
+    })
+    .then((r) => r.data);
+};
+
+/** Удалить изображение объекта */
+export const deleteAssetImage = (id: number) =>
+  http.delete<void>(`/api/assets/${id}/image`).then((r) => r.data);
+
+/** Базовый URL для отображения статики (изображений) — нужен в production,
+ *  когда фронт и бэк на разных доменах */
+export const staticBaseUrl = baseURL;
+
 
 // ── Осмотры, ремонты, отказы ──────────────────────────────────────────────────
 
@@ -85,6 +104,10 @@ export const updateInspection = (id: number, body: Partial<Inspection>) =>
 /** Удалить запись об осмотре */
 export const deleteInspection = (id: number) =>
   http.delete<void>(`/api/inspections/${id}`).then((r) => r.data);
+
+/** Список всех ремонтов (последние 100) */
+export const listRepairs = () =>
+  http.get<Repair[]>("/api/repairs").then((r) => r.data);
 
 /** История ремонтов конкретного объекта */
 export const getAssetRepairs = (id: number) =>
@@ -129,9 +152,11 @@ export const deleteFailure = (id: number) =>
 export const calculateRisk = (assetId: number) =>
   http.post<RiskScore>(`/api/risk/calculate/${assetId}`).then((r) => r.data);
 
-/** Пакетный расчёт рисков для всех активных объектов */
+/** Пакетный расчёт рисков для всех активных объектов (долгая операция) */
 export const calculateAllRisks = () =>
-  http.post<{ calculated: number; results: any[] }>("/api/risk/calculate-all").then((r) => r.data);
+  http
+    .post<{ calculated: number; results: any[] }>("/api/risk/calculate-all", null, { timeout: 120000 })
+    .then((r) => r.data);
 
 /** Список последних риск-скоров (по одному на каждый объект) */
 export const listRiskScores = () =>
@@ -139,7 +164,9 @@ export const listRiskScores = () =>
 
 /** Переобучить ML-модель (занимает 1–3 минуты, GridSearchCV) */
 export const retrainModel = () =>
-  http.post<{ ok: boolean; metrics: ModelMetrics }>("/api/risk/retrain").then((r) => r.data);
+  http
+    .post<{ ok: boolean; metrics: ModelMetrics }>("/api/risk/retrain", null, { timeout: 300000 })
+    .then((r) => r.data);
 
 /** Метрики текущей ML-модели (AUC, F1, признаки и т.д.) */
 export const getModelMetrics = () =>

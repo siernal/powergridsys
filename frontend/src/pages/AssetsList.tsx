@@ -5,7 +5,7 @@
 
 import { useEffect, useState, useMemo } from "react";
 import { Link } from "react-router-dom";
-import { listAssets, deleteAsset } from "../api/client";
+import { listAssets, deleteAsset, staticBaseUrl } from "../api/client";
 import type { Asset } from "../types";
 import { Loading } from "../components/Loading";
 import Modal from "../components/Modal";
@@ -124,6 +124,7 @@ export default function AssetsList() {
             <thead>
               <tr>
                 <th>ID</th>
+                <th style={{ width: 56 }}>Фото</th>
                 <th>Наименование</th>
                 <th>Тип</th>
                 <th>Напряжение</th>
@@ -138,6 +139,18 @@ export default function AssetsList() {
               {filtered.map((a) => (
                 <tr key={a.id}>
                   <td>#{a.id}</td>
+                  <td>
+                    {a.image_url ? (
+                      <img
+                        src={staticBaseUrl + a.image_url}
+                        alt=""
+                        style={{ width: 40, height: 40, objectFit: "cover",
+                                 borderRadius: 4, border: "1px solid #e5e7eb" }}
+                      />
+                    ) : (
+                      <span className="muted" style={{ fontSize: 18 }}>—</span>
+                    )}
+                  </td>
                   <td><Link to={`/assets/${a.id}`}>{a.name}</Link></td>
                   <td>{CATEGORY_LABEL[a.asset_type?.category || ""] || a.asset_type?.category}</td>
                   <td>{a.voltage_class || "—"}</td>
