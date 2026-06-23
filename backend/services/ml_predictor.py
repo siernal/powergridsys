@@ -22,6 +22,7 @@ from sklearn.ensemble import (
 )
 from sklearn.model_selection import train_test_split, GridSearchCV
 from sklearn.metrics import roc_auc_score, f1_score
+from sklearn.calibration import CalibratedClassifierCV
 
 logger = logging.getLogger(__name__)
 MODEL_VERSION = "2.0"
@@ -230,12 +231,24 @@ def train_model(
     best = search.best_estimator_
     logger.info(f"Best params: {search.best_params_}")
 
-    y_pred = best.predict(X_test)
-    y_prob = best.predict_proba(X_test)[:, 1]
+    # Калибровка вероятностей через изотоническую регрессию (CV=3 в облегчённом
+    # режиме, CV=5 в полном). Без калибровки Random Forest на маленьком датасете
+    # систематически «съёживает» вероятности к среднему — максимум выдаёт ~0.2,
+    # хотя реальный риск некоторых объектов значительно выше. Изотоническая
+    # калибровка растягивает распределение вероятностей и делает их адекватными
+    # для визуального ранжирования рисков. ROC-AUC при этом сохраняется.
+    cal_cv = 3 if fast else 5
+    logger.info(f"Calibrating probabilities with isotonic regression (cv={cal_cv})...")
+    calibrated = CalibratedClassifierCV(estimator=best, method="isotonic", cv=cal_cv)
+    calibrated.fit(X_train, y_train)
+
+    y_pred = calibrated.predict(X_test)
+    y_prob = calibrated.predict_proba(X_test)[:, 1]
     auc = roc_auc_score(y_test, y_prob)
     f1  = f1_score(y_test, y_pred, average="macro")
 
-    # Важность признаков из RF-компоненты ансамбля
+    # Важность признаков берётся из RF-компоненты исходного ансамбля
+    # (калибровка не меняет внутреннюю структуру модели).
     rf_clf = best.named_estimators_["rf"]
     feat_imp = list(zip(list(X.columns), rf_clf.feature_importances_.tolist()))
 
@@ -257,7 +270,7 @@ def train_model(
     os.makedirs(os.path.dirname(model_path), exist_ok=True)
     with open(model_path, "wb") as f:
         pickle.dump({
-            "model":                 best,
+            "model":                 calibrated,   # сохраняем откалиброванную модель
             "feature_columns":       list(X.columns),
             "feature_importances":   feat_imp,
             "metrics":               metrics,

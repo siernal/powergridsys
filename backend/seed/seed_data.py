@@ -262,12 +262,119 @@ def seed(db: Session):
     db.add_all(sensor_records)
     db.flush()
 
+    # --- Критические объекты для демонстрации высокого риска ---
+    # Несколько заведомо «горящих» объектов (старые + критичные + куча отказов
+    # + давно не обслужены) — чтобы на странице прогноза были видны и красные,
+    # и жёлтые риски, а не только зелёный массив 5-20 %.
+    critical_added = _add_critical_assets(db, asset_types, users)
+
     db.commit()
     print(
         f"Seed done: {len(assets)} assets, {len(inspections)} inspections, "
         f"{len(repairs)} repairs, {len(failures)} failures, "
-        f"{len(weather_records)} weather snapshots, {len(sensor_records)} telemetry rows."
+        f"{len(weather_records)} weather snapshots, {len(sensor_records)} telemetry rows. "
+        f"Critical demo assets: {critical_added}."
     )
+
+
+def _add_critical_assets(db: Session, asset_types: list, users: list) -> int:
+    """Создать ~6 «критических» объектов с гарантированно высоким риском.
+
+    Параметры подобраны так, чтобы ML-модель уверенно отнесла их в high:
+    выработавший ресурс возраст, максимальная критичность, много отказов
+    за последний год, давно не было ТО, актуальная высокая нагрузка.
+    Idempotent: проверяет по префиксу имени «CRIT-», не создаёт повторно.
+    """
+    from sqlalchemy import func as sa_func
+    already = db.query(sa_func.count(Asset.id)).filter(
+        Asset.name.like("CRIT-%")
+    ).scalar() or 0
+    if already > 0:
+        return 0
+
+    critical_types = [
+        next(t for t in asset_types if t.name == "Трансформатор 110кВ"),
+        next(t for t in asset_types if t.name == "Подстанция 110кВ"),
+        next(t for t in asset_types if t.name == "ВЛ 110кВ"),
+        next(t for t in asset_types if t.name == "Трансформатор 35кВ"),
+        next(t for t in asset_types if t.name == "Подстанция 35кВ"),
+        next(t for t in asset_types if t.name == "Кабельная линия 10кВ"),
+    ]
+
+    created = 0
+    for idx, atype in enumerate(critical_types, 1):
+        age_years = random.uniform(32, 45)
+        installed = (datetime.utcnow() - timedelta(days=int(age_years * 365))).date()
+
+        asset = Asset(
+            name=f"CRIT-{idx:02d} {atype.name} (демо)",
+            asset_type_id=atype.id,
+            location_lat=round(55.5 + random.uniform(-1.5, 1.5), 6),
+            location_lon=round(37.0 + random.uniform(-2.0, 2.0), 6),
+            region=random.choice(REGIONS),
+            installed_date=installed,
+            voltage_class=random.choice(VOLTAGE_CLASSES.get(atype.category, ["10кВ"])),
+            criticality=round(random.uniform(0.92, 0.98), 3),
+            status="active",
+        )
+        db.add(asset)
+        db.flush()
+
+        n_fail = random.randint(8, 12)
+        for j in range(n_fail):
+            fail_dt = datetime.utcnow() - timedelta(days=random.randint(5, 360))
+            sev = random.choices(["minor", "major", "critical"], weights=[2, 4, 4])[0]
+            downtime = {"minor": 6.0, "major": 24.0, "critical": 72.0}[sev]
+            db.add(FailureEvent(
+                asset_id=asset.id,
+                failed_at=fail_dt,
+                failure_type=random.choice([
+                    "Пробой изоляции", "Перегрев обмотки",
+                    "Короткое замыкание", "Износ контактов",
+                ]),
+                severity=sev,
+                downtime_hours=downtime + random.uniform(0, 8),
+                root_cause="Износ оборудования (выработан ресурс)",
+                resolved_at=fail_dt + timedelta(hours=downtime + 2),
+            ))
+
+        old_rep_dt = datetime.utcnow() - timedelta(days=random.randint(1200, 1800))
+        db.add(Repair(
+            asset_id=asset.id,
+            repair_type="capital",
+            started_at=old_rep_dt,
+            completed_at=old_rep_dt + timedelta(hours=48),
+            cost=350000.0,
+            work_description=f"Капитальный ремонт {asset.name}",
+            performed_by="Бригада №1",
+        ))
+
+        db.add(Inspection(
+            asset_id=asset.id,
+            inspector_id=users[2].id,
+            inspected_at=datetime.utcnow() - timedelta(days=random.randint(10, 60)),
+            condition_score=random.choice([1, 2]),
+            defects_found="Множественные трещины изоляторов, следы перегрева",
+            notes="Объект кандидат на вывод в капремонт",
+        ))
+
+        for d in range(7):
+            for h in [6, 12, 18]:
+                dt = datetime.utcnow() - timedelta(days=d, hours=h)
+                db.add(SensorSnapshot(
+                    asset_id=asset.id,
+                    recorded_at=dt,
+                    load_percent=round(random.uniform(85, 102), 1),
+                    temperature_c=round(random.uniform(12, 25), 1),
+                    voltage_deviation=round(random.gauss(3, 1.5), 2),
+                    current_a=round(random.uniform(280, 360), 1),
+                    vibration_level=round(random.uniform(0.4, 0.8), 3),
+                ))
+
+        created += 1
+
+    db.flush()
+    return created
 
 
 if __name__ == "__main__":
