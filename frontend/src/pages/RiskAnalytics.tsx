@@ -48,6 +48,25 @@ export default function RiskAnalytics() {
   };
   useEffect(loadAll, []);
 
+  // Парсер времени из бэка (UTC без TZ-суффикса) с приведением к Екатеринбургу.
+  // ВАЖНО: расчёт через useMemo должен быть ДО условных return,
+  // иначе нарушаются «правила хуков» React (и страница падает в белый экран).
+  const parseUtc = (s?: string | null) =>
+    s ? new Date(/[zZ]|[+-]\d{2}:?\d{2}$/.test(s) ? s : s + "Z") : null;
+  const fmtEkb = (d: Date | null) =>
+    d ? d.toLocaleString("ru-RU", {
+      day: "2-digit", month: "long", year: "numeric",
+      hour: "2-digit", minute: "2-digit",
+      timeZone: "Asia/Yekaterinburg",
+    }) + " (Екб)" : "—";
+  const lastRiskCalcAt = useMemo(() => {
+    const ts = all
+      .map((a) => parseUtc(a.calculated_at)?.getTime())
+      .filter((t): t is number => typeof t === "number");
+    return ts.length ? new Date(Math.max(...ts)) : null;
+  }, [all]);
+  const modelTrainedAt = parseUtc(metrics?.trained_at);
+
   const handleCalc = async () => {
     setBusyCalc(true); setMsg(null);
     try {
@@ -139,6 +158,31 @@ export default function RiskAnalytics() {
         на основе ансамбля Random Forest + Gradient Boosting,
         обученного на 10 000 синтетических примерах, 19 признаках.
       </p>
+
+      {/* ── Плашка: когда последний раз пересчитывали риски и обучали модель ── */}
+      <div className="card" style={{
+        marginBottom: 16,
+        borderLeft: "4px solid #2563eb",
+        padding: "10px 14px",
+        display: "flex", gap: 20, flexWrap: "wrap",
+      }}>
+        <div>
+          <div style={{ fontSize: 11, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5 }}>
+            Риски пересчитаны
+          </div>
+          <div style={{ fontWeight: 600, fontSize: 13, marginTop: 2 }}>
+            {fmtEkb(lastRiskCalcAt)}
+          </div>
+        </div>
+        <div>
+          <div style={{ fontSize: 11, color: "#6b7280", textTransform: "uppercase", letterSpacing: 0.5 }}>
+            Модель обучена
+          </div>
+          <div style={{ fontWeight: 600, fontSize: 13, marginTop: 2 }}>
+            {fmtEkb(modelTrainedAt)}
+          </div>
+        </div>
+      </div>
 
       {/* ── Панель управления операциями ─────────────────────────── */}
       <div className="card">

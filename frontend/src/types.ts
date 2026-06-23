@@ -34,8 +34,12 @@ export interface AssetDetail extends Asset {
   repairs_count?: number | null;              // всего ремонтов
   latest_inspection_score?: number | null;    // последняя оценка осмотра 1..5
   days_since_maintenance?: number | null;     // дней без ТО
-  latest_risk_probability?: number | null;    // последняя вероятность отказа 0..1
+  latest_risk_probability?: number | null;    // последняя вероятность отказа 0..1 (со скидкой за свежее ТО)
   latest_risk_level?: "low" | "medium" | "high" | string | null;
+  latest_risk_probability_raw?: number | null;   // модельная оценка до применения скидки
+  latest_risk_recency_factor?: number | null;    // коэффициент скидки 0..1
+  previous_risk_probability?: number | null;     // предыдущий риск (для отрисовки «было → стало»)
+  previous_risk_calculated_at?: string | null;
   health_score?: number | null;               // балл здоровья из digital twin 0..100
 }
 
@@ -99,6 +103,8 @@ export interface MaintenancePlan {
   status: string;                       // «scheduled» / «completed» / «cancelled»
   notes?: string | null;               // заметки с деталями расчёта приоритета
   auto_generated: boolean;             // true = создано алгоритмом
+  created_at?: string | null;          // когда сгенерирована запись плана
+  current_risk_probability?: number | null;  // актуальный ML-риск объекта (а не зафиксированный в notes)
 }
 
 /** Сводные KPI для главного дашборда */
@@ -124,6 +130,7 @@ export interface TopRiskAsset {
   risk_prob: number | null;    // вероятность отказа 0..1; null если риск не рассчитан
   risk_level: string | null;   // «high» / «medium» / «low»; null если риск не рассчитан
   criticality: number;         // критичность 0..1
+  calculated_at?: string | null;  // когда был рассчитан риск (UTC, ISO)
 }
 
 /** Метрики качества ML-модели (отображаются на странице «Прогноз отказов») */

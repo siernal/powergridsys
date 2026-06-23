@@ -32,9 +32,15 @@ Thumbs.db
 # Если хотите хранить документы ВКР в этом же репозитории — удалите эти строки.
 *.docx
 *.pdf
+*.pptx
 page-*.jpg
 p-*.jpg
 er_diagram.png
 arch_diagram.png
 twin_demo.png
 REVERSE_ENGINEERING_REPORT.md
+Презентация_*.md
+
+# ── Runtime-загрузки (картинки объектов, аватарки и т. п.) ─────────────────
+# Папка наполняется в процессе работы приложения, в репозитории не нужна.
+/backend/static/

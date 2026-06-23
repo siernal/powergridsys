@@ -7,10 +7,12 @@
 import { useEffect, useState, useMemo } from "react";
 import { Link } from "react-router-dom";
 import {
-  generateMaintenancePlan, listPlans, updatePlanStatus,
+  generateMaintenancePlan, listPlans,
 } from "../api/client";
 import type { MaintenancePlan } from "../types";
 import { Loading, Spinner } from "../components/Loading";
+import Modal from "../components/Modal";
+import RepairForm from "../components/forms/RepairForm";
 
 const TYPE_LABEL: Record<string, string> = {
   emergency_inspection: "Срочный осмотр",
@@ -47,11 +49,14 @@ export default function MaintenancePlanPage() {
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
   const [msg, setMsg] = useState<string | null>(null);
-  const [horizon, setHorizon] = useState(180);
+  const [horizon, setHorizon] = useState(90);
 
   const load = () => {
     setLoading(true);
-    listPlans({ status: "scheduled" })
+    // Загружаем все статусы — и scheduled, и completed.
+    // Выполненные записи остаются видимыми с пометкой «ТО проведено»,
+    // чтобы для защиты была наглядна связь риск → ТО → закрытие пункта плана.
+    listPlans()
       .then(setPlans)
       .catch((e) => setErr(e?.message || "Ошибка"))
       .finally(() => setLoading(false));
@@ -68,21 +73,91 @@ export default function MaintenancePlanPage() {
     finally { setBusy(false); }
   };
 
-  const onComplete = async (id: number) => {
-    if (!confirm("Отметить работу как выполненную?")) return;
-    await updatePlanStatus(id, "completed");
+  // Какой объект сейчас редактируется через модалку «Зафиксировать ТО».
+  // null = модалка закрыта; число = asset_id.
+  const [repairFor, setRepairFor] = useState<{ id: number; name: string } | null>(null);
+
+  // Клик «Выполнено» в строке плана — открывает форму создания записи о ремонте/ТО.
+  // После сохранения записи бэкенд (хук _close_matching_plan) сам переведёт
+  // соответствующую плановую запись в status='completed', а риск-скор для
+  // объекта пересчитается через _recalculate_risk_for_asset.
+  const onComplete = (plan: MaintenancePlan) => {
+    setRepairFor({
+      id: plan.asset_id,
+      name: plan.asset_name || `№${plan.asset_id}`,
+    });
+  };
+  const onRepairSaved = () => {
+    setRepairFor(null);
     load();
   };
 
-  const totalCost = plans.reduce((s, p) => s + (p.estimated_cost || 0), 0);
-  const totalH    = plans.reduce((s, p) => s + (p.estimated_duration_h || 0), 0);
+  // Тумблер «Показать выполненные»: по умолчанию выкл — completed скрыты.
+  const [showCompleted, setShowCompleted] = useState(false);
+
+  // Только запланированные работы участвуют в подсчёте человекочасов и стоимости.
+  const activePlans = plans.filter((p) => (p.status || "scheduled") === "scheduled");
+
+  // Что реально показываем в таблице — фильтр срабатывает мгновенно через useMemo,
+  // без обращения к серверу.
+  const visiblePlans = useMemo(
+    () => (showCompleted ? plans : activePlans),
+    [plans, activePlans, showCompleted],
+  );
+  const completedCount = plans.length - activePlans.length;
+  const totalCost   = activePlans.reduce((s, p) => s + (p.estimated_cost || 0), 0);
+  const totalH      = activePlans.reduce((s, p) => s + (p.estimated_duration_h || 0), 0);
+
+  // Когда был последний раз сгенерирован план — берём максимальный created_at
+  // среди запланированных (auto_generated) записей.
+  // ВАЖНО: бэкенд хранит время в UTC без TZ-суффикса. Без явного "Z" браузер
+  // парсит строку как локальное время и сдвига на нужный часовой пояс не происходит.
+  const parseUtc = (s: string) =>
+    new Date(/[zZ]|[+-]\d{2}:?\d{2}$/.test(s) ? s : s + "Z");
+
+  const lastGeneratedAt = useMemo(() => {
+    const dates = activePlans
+      .filter((p) => p.auto_generated && p.created_at)
+      .map((p) => parseUtc(p.created_at as string).getTime());
+    if (!dates.length) return null;
+    return new Date(Math.max(...dates));
+  }, [activePlans]);
 
   return (
     <div>
       <div className="row-between" style={{ marginBottom: 16 }}>
         <h1>План ТОиР</h1>
-        <span className="muted">{plans.length} запланированных работ</span>
+        <span className="muted">
+          {activePlans.length} запланированных
+          {plans.length - activePlans.length > 0 && (
+            <> · {plans.length - activePlans.length} выполненных</>
+          )}
+        </span>
       </div>
+
+      {/* ── Плашка: когда план был сгенерирован ──────────────────── */}
+      {lastGeneratedAt && (
+        <div className="card" style={{
+          marginBottom: 16,
+          borderLeft: "4px solid #2563eb",
+          padding: "10px 14px",
+          display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap",
+        }}>
+          <span style={{ fontSize: 18 }}>📅</span>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 600, fontSize: 13 }}>
+              План сгенерирован: {lastGeneratedAt.toLocaleString("ru-RU", {
+                day: "2-digit", month: "long", year: "numeric",
+                hour: "2-digit", minute: "2-digit",
+                timeZone: "Asia/Yekaterinburg",
+              })} (Екб)
+            </div>
+            <div style={{ fontSize: 12, color: "#6b7280", marginTop: 2 }}>
+              Риски в колонке «Основание» зафиксированы на момент генерации.
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* ── Плашка: правила определения уровня риска ─────────────── */}
       <div className="card" style={{ marginBottom: 16 }}>
@@ -177,13 +252,33 @@ export default function MaintenancePlanPage() {
         </div>
       </div>
 
+      {/* ── Тумблер «Показать выполненные» — переключает мгновенно ───── */}
+      {!loading && !err && completedCount > 0 && (
+        <div className="row-between" style={{ margin: "12px 4px 8px" }}>
+          <span className="muted" style={{ fontSize: 13 }}>
+            {showCompleted
+              ? `Показаны все ${plans.length} записей (${completedCount} выполненных)`
+              : `${activePlans.length} активных записей · ${completedCount} выполненных скрыто`}
+          </span>
+          <label style={{ display: "inline-flex", alignItems: "center", gap: 8, cursor: "pointer", fontSize: 13 }}>
+            <input type="checkbox" checked={showCompleted}
+                   onChange={(e) => setShowCompleted(e.target.checked)} />
+            Показать выполненные
+          </label>
+        </div>
+      )}
+
       {/* ── Таблица запланированных работ ────────────────────────── */}
       {loading ? <Loading /> :
        err ? <div className="error">{err}</div> :
-       plans.length === 0 ? (
+       visiblePlans.length === 0 ? (
         <div className="card empty">
-          План пуст. Нажмите «Сгенерировать план» выше.<br />
-          Перед этим лучше <Link to="/risk">рассчитать риски</Link>.
+          {plans.length === 0
+            ? <>План пуст. Нажмите «Сгенерировать план» выше.<br />
+              Перед этим лучше <Link to="/risk">рассчитать риски</Link>.</>
+            : <>Активных работ нет — все плановые задачи выполнены.<br />
+              Включите «Показать выполненные», чтобы увидеть историю.</>
+          }
         </div>
        ) : (
         <div className="card" style={{ padding: 0 }}>
@@ -201,12 +296,18 @@ export default function MaintenancePlanPage() {
               </tr>
             </thead>
             <tbody>
-              {plans.map((p) => {
+              {visiblePlans.map((p) => {
                 const parsed = parseNotes(p.notes);
                 const rs = parsed?.riskPct != null ? riskStyle(parsed.riskPct) : null;
+                const isDone = (p.status || "scheduled") !== "scheduled";
                 return (
                   <tr key={p.id}
-                      style={rs ? { background: rs.bg + "66" } : undefined}>
+                      style={
+                        isDone
+                          ? { background: "#f3f4f6", color: "#9ca3af",
+                              textDecoration: "line-through", opacity: 0.85 }
+                          : rs ? { background: rs.bg + "66" } : undefined
+                      }>
                     <td style={{ whiteSpace: "nowrap" }}>
                       {new Date(p.plan_date).toLocaleDateString("ru-RU", {
                         day: "2-digit", month: "short", year: "numeric"
@@ -248,9 +349,21 @@ export default function MaintenancePlanPage() {
                     </td>
 
                     <td>
-                      <button className="btn btn--ghost btn--sm" onClick={() => onComplete(p.id)}>
-                        ✓ Выполнено
-                      </button>
+                      {isDone ? (
+                        <span style={{
+                          display: "inline-flex", alignItems: "center", gap: 4,
+                          background: "#dcfce7", color: "#14532d",
+                          borderRadius: 6, padding: "2px 8px",
+                          fontWeight: 600, fontSize: 12,
+                          textDecoration: "none",
+                        }}>
+                          ✓ ТО проведено
+                        </span>
+                      ) : (
+                        <button className="btn btn--ghost btn--sm" onClick={() => onComplete(p)}>
+                          ✓ Выполнено
+                        </button>
+                      )}
                     </td>
                   </tr>
                 );
@@ -259,6 +372,18 @@ export default function MaintenancePlanPage() {
           </table>
         </div>
        )}
+
+      {/* Модалка фиксации факта проведённого ТО прямо со страницы плана.
+          Сохранение записи Repair → бэкенд автоматически закроет
+          соответствующую плановую запись и пересчитает риск объекта. */}
+      <Modal open={repairFor !== null}
+             title={repairFor ? `Зафиксировать ТО — ${repairFor.name}` : ""}
+             onClose={() => setRepairFor(null)} width={640}>
+        {repairFor && (
+          <RepairForm assetId={repairFor.id} initial={null}
+                      onCancel={() => setRepairFor(null)} onDone={onRepairSaved} />
+        )}
+      </Modal>
     </div>
   );
 }

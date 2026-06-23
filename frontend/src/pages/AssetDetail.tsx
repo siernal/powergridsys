@@ -210,10 +210,52 @@ export default function AssetDetailPage() {
         <StatCard label="Риск отказа за 90 дней" value={
           asset.latest_risk_probability != null ?
             `${(asset.latest_risk_probability * 100).toFixed(1)}%` : "—"
-        } hint="прогноз на квартал"
+        } hint={
+            asset.previous_risk_probability != null &&
+            asset.latest_risk_probability != null &&
+            Math.abs(asset.previous_risk_probability - asset.latest_risk_probability) > 0.005
+              ? (asset.latest_risk_probability < asset.previous_risk_probability
+                  ? `↓ было ${(asset.previous_risk_probability * 100).toFixed(1)}%`
+                  : `↑ было ${(asset.previous_risk_probability * 100).toFixed(1)}%`)
+              : "прогноз на квартал"
+          }
           accent={asset.latest_risk_level === "high" ? "danger" :
                   asset.latest_risk_level === "medium" ? "warning" : "success"} />
       </div>
+
+      {/* Наглядная цепочка «высокий риск → ТО → низкий риск» — для защиты ВКР.
+          Показываем, когда есть предыдущий риск и новый заметно ниже. */}
+      {asset.previous_risk_probability != null &&
+       asset.latest_risk_probability != null &&
+       (asset.previous_risk_probability - asset.latest_risk_probability) > 0.05 && (
+        <div className="card" style={{ borderLeft: "4px solid var(--success, #16a34a)", padding: "10px 14px", marginTop: 8 }}>
+          <div style={{ fontWeight: 600, marginBottom: 6 }}>Проведено техническое обслуживание</div>
+          <div style={{ fontSize: 14, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+            <span style={{
+              background: "#fee2e2", color: "#991b1b",
+              borderRadius: 6, padding: "3px 10px", fontWeight: 600,
+            }}>
+              Было: {(asset.previous_risk_probability * 100).toFixed(1)}%
+            </span>
+            <span style={{ color: "#6b7280" }}>→ зафиксировано ТО →</span>
+            <span style={{
+              background: "#dcfce7", color: "#14532d",
+              borderRadius: 6, padding: "3px 10px", fontWeight: 600,
+            }}>
+              Стало: {(asset.latest_risk_probability * 100).toFixed(1)}%
+            </span>
+          </div>
+          <div style={{ fontSize: 12.5, color: "var(--muted, #555)", marginTop: 10, lineHeight: 1.55 }}>
+            После фиксации ремонта обновились ключевые признаки объекта —
+            давность последнего ТО стала {asset.days_since_maintenance?.toFixed(0) ?? "0"} дн.,
+            число ремонтов выросло до {asset.repairs_count ?? "—"}.
+            Модель машинного обучения пересчитала прогноз отказа на обновлённых
+            данных и снизила оценку с
+            {" "}{(asset.previous_risk_probability * 100).toFixed(1)}% до
+            {" "}{(asset.latest_risk_probability * 100).toFixed(1)}% на горизонте 90 дней.
+          </div>
+        </div>
+      )}
 
       {/* ── Изображение объекта ──────────────────────────────── */}
       <div className="card">

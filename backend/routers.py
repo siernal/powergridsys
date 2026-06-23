@@ -108,7 +108,10 @@ def list_assets(
         q = q.filter(Asset.region == region)
     if status:
         q = q.filter(Asset.status == status)
-    return q.offset(skip).limit(limit).all()
+    # Без явного order_by PostgreSQL возвращает строки в недетерминированном
+    # порядке, и таблица «прыгает» при смене фильтров. Сортируем по имени,
+    # вторичный ключ по id — на случай совпадающих имён.
+    return q.order_by(Asset.name, Asset.id).offset(skip).limit(limit).all()
 
 
 @assets_router.get("/types", response_model=List[dict])
@@ -147,7 +150,10 @@ def get_asset(asset_id: int, db: Session = Depends(get_db)):
             joinedload(Asset.repairs),
             joinedload(Asset.failures),
             joinedload(Asset.inspections),
-            joinedload(Asset.risk_scores),
+            # ВНИМАНИЕ: НЕ joinedload(Asset.risk_scores) — таблица risk_scores
+            # быстро разрастается из-за симулятора (новая запись каждые ~6 тиков
+            # на каждый объект). joinedload подгрузил бы тысячи строк и убил бы
+            # запрос. Берём только две последние ML-записи отдельным узким запросом.
         )
         .filter(Asset.id == asset_id)
         .first()
@@ -158,11 +164,23 @@ def get_asset(asset_id: int, db: Session = Depends(get_db)):
     age = asset_age(asset.installed_date)
     dsm = days_since_last_maintenance(asset)
 
-    # Последний риск-скор и последний осмотр (по дате)
-    latest_risk = (
-        max(asset.risk_scores, key=lambda r: r.calculated_at)
-        if asset.risk_scores else None
+    # Последние две ML-записи: latest — для текущего риска,
+    # previous — для отрисовки «было → стало» на карточке.
+    # Симуляторные записи (model_version="sim-*") игнорируем — они для графика истории,
+    # но «текущий риск объекта» должен оставаться ML-овским.
+    last_two = (
+        db.query(RiskScore)
+        .filter(
+            RiskScore.asset_id == asset_id,
+            ~RiskScore.model_version.ilike("sim%"),
+        )
+        .order_by(RiskScore.calculated_at.desc())
+        .limit(2)
+        .all()
     )
+    latest_risk   = last_two[0] if len(last_two) >= 1 else None
+    previous_risk = last_two[1] if len(last_two) >= 2 else None
+
     latest_insp = (
         max(asset.inspections, key=lambda i: i.inspected_at)
         if asset.inspections else None
@@ -172,15 +190,25 @@ def get_asset(asset_id: int, db: Session = Depends(get_db)):
     twin = get_twin()
     node_state = twin.get_node_state(asset_id) or {}
 
+    # Сырое (модельное, без скидки за свежее ТО) значение риска
+    # хранится в feature_snapshot — достаём его, если есть.
+    snap = (latest_risk.feature_snapshot or {}) if latest_risk else {}
+    raw_prob = snap.get("risk_probability_raw")
+    recency = snap.get("recency_factor")
+
     result = AssetDetail.model_validate(asset)
-    result.age_years               = round(age, 2)
-    result.failures_count          = len(asset.failures)
-    result.repairs_count           = len(asset.repairs)
-    result.days_since_maintenance  = round(dsm, 1)
-    result.latest_inspection_score = latest_insp.condition_score if latest_insp else None
-    result.latest_risk_probability = latest_risk.risk_probability if latest_risk else None
-    result.latest_risk_level       = latest_risk.risk_level if latest_risk else None
-    result.health_score            = node_state.get("health")
+    result.age_years                   = round(age, 2)
+    result.failures_count              = len(asset.failures)
+    result.repairs_count               = len(asset.repairs)
+    result.days_since_maintenance      = round(dsm, 1)
+    result.latest_inspection_score     = latest_insp.condition_score if latest_insp else None
+    result.latest_risk_probability     = latest_risk.risk_probability if latest_risk else None
+    result.latest_risk_level           = latest_risk.risk_level if latest_risk else None
+    result.latest_risk_probability_raw = raw_prob
+    result.latest_risk_recency_factor  = recency
+    result.previous_risk_probability   = previous_risk.risk_probability if previous_risk else None
+    result.previous_risk_calculated_at = previous_risk.calculated_at if previous_risk else None
+    result.health_score                = node_state.get("health")
     return result
 
 
@@ -310,7 +338,11 @@ inspections_router = APIRouter(prefix="/api/inspections", tags=["Inspections"])
 
 @inspections_router.post("", response_model=InspectionOut, status_code=201)
 def add_inspection(body: InspectionCreate, db: Session = Depends(get_db)):
-    """Зафиксировать результат осмотра объекта."""
+    """Зафиксировать результат осмотра объекта.
+
+    Побочные эффекты:
+    - автоматический пересчёт риска для объекта (изменилась давность осмотра).
+    """
     asset = db.query(Asset).filter(Asset.id == body.asset_id).first()
     if not asset:
         raise HTTPException(404, "Объект не найден")
@@ -318,6 +350,11 @@ def add_inspection(body: InspectionCreate, db: Session = Depends(get_db)):
     db.add(insp)
     db.commit()
     db.refresh(insp)
+    # Автопересчёт риска — давность осмотра только что обновилась.
+    try:
+        _recalculate_risk_for_asset(body.asset_id, db)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Auto-recalc risk after inspection failed: %s", exc)
     return insp
 
 
@@ -363,11 +400,31 @@ repairs_router = APIRouter(prefix="/api/repairs", tags=["Repairs"])
 
 @repairs_router.post("", response_model=RepairOut, status_code=201)
 def add_repair(body: RepairCreate, db: Session = Depends(get_db)):
-    """Зафиксировать факт ремонта или ТО."""
+    """Зафиксировать факт ремонта или ТО.
+
+    Побочные эффекты (важны для корректной работы планировщика):
+    - закрывается ближайшая запланированная задача в плане ТОиР
+      по этому объекту (status = 'completed');
+    - автоматически пересчитывается риск отказа для объекта
+      (давность ТО и число ремонтов только что изменились).
+    """
     repair = Repair(**body.model_dump())
     db.add(repair)
     db.commit()
     db.refresh(repair)
+
+    # 1) Закрыть соответствующую плановую запись (если есть)
+    try:
+        _close_matching_plan(repair, db)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Auto-close maintenance plan failed: %s", exc)
+
+    # 2) Пересчитать риск отказа для затронутого объекта
+    try:
+        _recalculate_risk_for_asset(repair.asset_id, db)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Auto-recalc risk after repair failed: %s", exc)
+
     return repair
 
 
@@ -539,11 +596,65 @@ def _build_asset_features(asset: Asset, db: Session) -> dict:
     }
 
 
-@risk_router.post("/calculate/{asset_id}", response_model=RiskScoreOut)
-def calculate_risk(asset_id: int, db: Session = Depends(get_db)):
-    """Рассчитать риск отказа для одного объекта и сохранить в БД.
+def _apply_recency_discount(raw_prediction: dict, days_since_maintenance: float) -> dict:
+    """Применить эксплуатационную скидку к риску в зависимости от свежести ТО.
 
-    Используется кнопкой «Пересчитать риск» на карточке объекта.
+    Модель машинного обучения оценивает долгосрочный физический риск
+    отказа исходя из износа, нагрузки, истории отказов и т. д. Данная
+    функция дополняет её прогноз операционной поправкой: если ТО было
+    проведено недавно, фактический риск отказа в ближайшие 90 дней
+    объективно ниже модельной оценки. Это отражает реальную инженерную
+    практику — после планового обслуживания состояние оборудования
+    временно улучшается, и риск немедленного отказа снижается.
+
+    Коэффициент скидки (recency_factor):
+      dsm < 14:   factor = 0.30 (риск уменьшается в ~3 раза)
+      dsm = 30:   factor ≈ 0.45
+      dsm = 60:   factor ≈ 0.72
+      dsm ≥ 90:   factor = 1.00 (скидка не применяется)
+
+    Возвращает обогащённый словарь с полями:
+      risk_probability       — итоговый (со скидкой) риск
+      risk_probability_raw   — исходная модельная оценка
+      recency_factor         — применённый коэффициент
+    """
+    raw_prob = float(raw_prediction["risk_probability"])
+
+    if days_since_maintenance >= 90:
+        factor = 1.0
+    elif days_since_maintenance < 14:
+        factor = 0.30
+    else:
+        # линейная интерполяция от (14, 0.30) до (90, 1.0)
+        factor = 0.30 + 0.70 * ((days_since_maintenance - 14) / 76.0)
+
+    adjusted = raw_prob * factor
+
+    if adjusted < 0.30:
+        level = "low"
+    elif adjusted < 0.60:
+        level = "medium"
+    else:
+        level = "high"
+
+    out = dict(raw_prediction)
+    out["risk_probability"]     = round(adjusted, 4)
+    out["risk_percent"]         = round(adjusted * 100, 1)
+    out["risk_level"]           = level
+    out["risk_probability_raw"] = round(raw_prob, 4)
+    out["risk_percent_raw"]     = round(raw_prob * 100, 1)
+    out["recency_factor"]       = round(factor, 3)
+    return out
+
+
+def _recalculate_risk_for_asset(asset_id: int, db: Session) -> Optional[RiskScore]:
+    """Заново рассчитать риск для одного объекта и сохранить в БД.
+
+    Используется как побочный эффект при добавлении осмотра/ремонта
+    (чтобы карточка и план показывали актуальный риск без ручного
+    нажатия кнопки «Пересчитать»).
+
+    Возвращает созданную запись RiskScore либо None, если объект не найден.
     """
     asset = (
         db.query(Asset)
@@ -552,12 +663,10 @@ def calculate_risk(asset_id: int, db: Session = Depends(get_db)):
         .first()
     )
     if not asset:
-        raise HTTPException(404, "Объект не найден")
+        return None
 
     features = _build_asset_features(asset, db)
     prediction = predictor.predict(features)
-
-    # Сохраняем риск-скор с полным снимком признаков для объяснимости
     score = RiskScore(
         asset_id=asset_id,
         risk_probability=prediction["risk_probability"],
@@ -569,6 +678,66 @@ def calculate_risk(asset_id: int, db: Session = Depends(get_db)):
     db.add(score)
     db.commit()
     db.refresh(score)
+    return score
+
+
+def _close_matching_plan(repair: Repair, db: Session) -> Optional[MaintenancePlan]:
+    """Закрыть ближайшую плановую запись по факту проведённого ремонта/ТО.
+
+    Логика подбора:
+    1) ищем все scheduled MaintenancePlan по asset_id;
+    2) берём запись с plan_date ближе всего к дате выполнения ремонта
+       (или сегодняшней дате, если в репэйре её нет) в окне ± 60 дней;
+    3) переводим её в status='completed'.
+
+    Это убирает дубликат из плана ТОиР и позволяет планировщику не
+    предлагать повторно ту же работу до следующей генерации плана.
+    """
+    ref_dt = (repair.completed_at or repair.started_at or datetime.utcnow())
+    ref_date = ref_dt.date() if hasattr(ref_dt, "date") else ref_dt
+
+    candidates = (
+        db.query(MaintenancePlan)
+        .filter(
+            MaintenancePlan.asset_id == repair.asset_id,
+            MaintenancePlan.status == "scheduled",
+        )
+        .all()
+    )
+    if not candidates:
+        return None
+
+    # ближайшая по дате запись в окне ± 60 дней
+    best = None
+    best_delta = None
+    for plan in candidates:
+        delta = abs((plan.plan_date - ref_date).days)
+        if delta <= 60 and (best_delta is None or delta < best_delta):
+            best = plan
+            best_delta = delta
+
+    if best is None:
+        # ни одна plan-запись не попала в окно — план не трогаем
+        return None
+
+    best.status = "completed"
+    note = (best.notes or "").rstrip()
+    suffix = f" | Закрыто фактом ремонта #{repair.id} от {ref_date.isoformat()}"
+    best.notes = (note + suffix).strip()
+    db.commit()
+    db.refresh(best)
+    return best
+
+
+@risk_router.post("/calculate/{asset_id}", response_model=RiskScoreOut)
+def calculate_risk(asset_id: int, db: Session = Depends(get_db)):
+    """Рассчитать риск отказа для одного объекта и сохранить в БД.
+
+    Используется кнопкой «Пересчитать риск» на карточке объекта.
+    """
+    score = _recalculate_risk_for_asset(asset_id, db)
+    if score is None:
+        raise HTTPException(404, "Объект не найден")
     return score
 
 
@@ -593,7 +762,7 @@ def calculate_all_risks(db: Session = Depends(get_db)):
             risk_probability=prediction["risk_probability"],
             risk_level=prediction["risk_level"],
             forecast_horizon_days=prediction.get("forecast_horizon_days", 90),
-            feature_snapshot=features,
+            feature_snapshot={**features, **prediction},
             model_version=prediction["model_version"],
         )
         db.add(score)
@@ -604,19 +773,23 @@ def calculate_all_risks(db: Session = Depends(get_db)):
 
 @risk_router.get("/scores", response_model=List[RiskScoreOut])
 def list_risk_scores(limit: int = 200, db: Session = Depends(get_db)):
-    """Последний риск-скор для каждого объекта.
+    """Последний риск-скор от ML-модели для каждого объекта.
 
-    Используется subquery для выборки только последней записи по каждому asset_id.
+    Записи от симулятора (model_version начинается на "sim") исключаются —
+    они используются для графиков истории, но не как «текущий риск объекта».
     """
+    base = db.query(RiskScore).filter(~RiskScore.model_version.ilike("sim%"))
     subq = (
-        db.query(RiskScore.asset_id, func.max(RiskScore.calculated_at).label("max_dt"))
+        base.with_entities(
+            RiskScore.asset_id,
+            func.max(RiskScore.calculated_at).label("max_dt"),
+        )
         .group_by(RiskScore.asset_id)
         .subquery()
     )
     scores = (
-        db.query(RiskScore)
-        .join(subq, (RiskScore.asset_id == subq.c.asset_id) &
-                    (RiskScore.calculated_at == subq.c.max_dt))
+        base.join(subq, (RiskScore.asset_id == subq.c.asset_id) &
+                        (RiskScore.calculated_at == subq.c.max_dt))
         .limit(limit)
         .all()
     )
@@ -670,7 +843,13 @@ def get_plans(
     to_date: Optional[date] = None,
     db: Session = Depends(get_db),
 ):
-    """Список планов ТО с фильтрами по статусу, объекту и диапазону дат."""
+    """Список планов ТО с фильтрами по статусу, объекту и диапазону дат.
+
+    К каждой записи плана добавляется поле current_risk_probability —
+    самый свежий ML-овский риск для объекта (НЕ симуляторный).
+    Это нужно, чтобы пользователь видел актуальное состояние объекта,
+    а не вмороженное в notes значение на момент генерации плана.
+    """
     q = db.query(MaintenancePlan).options(joinedload(MaintenancePlan.asset))
     if status:
         q = q.filter(MaintenancePlan.status == status)
@@ -680,13 +859,46 @@ def get_plans(
         q = q.filter(MaintenancePlan.plan_date >= from_date)
     if to_date:
         q = q.filter(MaintenancePlan.plan_date <= to_date)
-    plans = q.order_by(MaintenancePlan.plan_date).all()
+    # Сортируем по дате, внутри одной даты — по приоритету (1 = самый срочный).
+    # Без вторичного ключа БД возвращает записи в insertion order и порядок
+    # на одну дату «прыгает» как попало.
+    # Выполненные записи в конец НЕ вытесняем — они сохраняют свою позицию
+    # в графике, а тумблер «Показать выполненные» на фронте просто скрывает их.
+    plans = q.order_by(
+        MaintenancePlan.plan_date,
+        MaintenancePlan.priority.asc().nulls_last(),
+        MaintenancePlan.id,
+    ).all()
 
-    # Подставляем имя объекта из связанного Asset
+    # Соберём свежие ML-риски пачкой по asset_id (один запрос, не N+1).
+    asset_ids = list({p.asset_id for p in plans if p.asset_id})
+    current_risks: dict[int, float] = {}
+    if asset_ids:
+        subq = (
+            db.query(
+                RiskScore.asset_id,
+                func.max(RiskScore.calculated_at).label("max_dt"),
+            )
+            .filter(
+                RiskScore.asset_id.in_(asset_ids),
+                ~RiskScore.model_version.ilike("sim%"),
+            )
+            .group_by(RiskScore.asset_id)
+            .subquery()
+        )
+        latest_rows = (
+            db.query(RiskScore.asset_id, RiskScore.risk_probability)
+            .join(subq, (RiskScore.asset_id == subq.c.asset_id) &
+                        (RiskScore.calculated_at == subq.c.max_dt))
+            .all()
+        )
+        current_risks = {aid: float(p) for aid, p in latest_rows}
+
     result = []
     for p in plans:
         out = MaintenancePlanOut.model_validate(p)
         out.asset_name = p.asset.name if p.asset else None
+        out.current_risk_probability = current_risks.get(p.asset_id)
         result.append(out)
     return result
 
@@ -883,19 +1095,25 @@ def top_risk_assets(limit: int = 10, db: Session = Depends(get_db)):
     """Топ-N объектов с наибольшей вероятностью отказа (только high и medium).
 
     Используется на дашборде для таблицы приоритетов.
+    Симуляторные записи (model_version="sim-*") исключаются — они для графиков
+    истории, а в таблице приоритетов должен быть ML-овский «текущий» риск.
     """
+    base = db.query(RiskScore).filter(~RiskScore.model_version.ilike("sim%"))
     subq = (
-        db.query(RiskScore.asset_id, func.max(RiskScore.calculated_at).label("max_dt"))
+        base.with_entities(
+            RiskScore.asset_id,
+            func.max(RiskScore.calculated_at).label("max_dt"),
+        )
         .group_by(RiskScore.asset_id).subquery()
     )
     rows = (
-        db.query(RiskScore, Asset)
-        .join(subq, (RiskScore.asset_id == subq.c.asset_id) &
-                    (RiskScore.calculated_at == subq.c.max_dt))
+        base.join(subq, (RiskScore.asset_id == subq.c.asset_id) &
+                        (RiskScore.calculated_at == subq.c.max_dt))
         .join(Asset, Asset.id == RiskScore.asset_id)
         .filter(RiskScore.risk_level.in_(["high", "medium"]))
         .order_by(desc(RiskScore.risk_probability))
         .limit(limit)
+        .with_entities(RiskScore, Asset)
         .all()
     )
     return [
@@ -917,9 +1135,12 @@ def all_risk_assets(db: Session = Depends(get_db)):
 
     Используется на странице «Прогноз отказов» для полной таблицы.
     LEFT JOIN — объекты без риска тоже попадают в результат со значениями null.
+    Симуляторные записи (model_version="sim-*") исключаются: они засоряют
+    таблицу и могут перебить актуальный ML-риск.
     """
     subq = (
         db.query(RiskScore.asset_id, func.max(RiskScore.calculated_at).label("max_dt"))
+        .filter(~RiskScore.model_version.ilike("sim%"))
         .group_by(RiskScore.asset_id).subquery()
     )
     rows = (
@@ -928,19 +1149,21 @@ def all_risk_assets(db: Session = Depends(get_db)):
         .outerjoin(
             RiskScore,
             (RiskScore.asset_id == subq.c.asset_id) &
-            (RiskScore.calculated_at == subq.c.max_dt),
+            (RiskScore.calculated_at == subq.c.max_dt) &
+            (~RiskScore.model_version.ilike("sim%")),
         )
         .order_by(desc(func.coalesce(RiskScore.risk_probability, 0.0)))
         .all()
     )
     return [
         {
-            "asset_id":    r.Asset.id,
-            "asset_name":  r.Asset.name,
-            "region":      r.Asset.region,
-            "risk_prob":   r.RiskScore.risk_probability if r.RiskScore else None,
-            "risk_level":  r.RiskScore.risk_level       if r.RiskScore else None,
-            "criticality": r.Asset.criticality,
+            "asset_id":      r.Asset.id,
+            "asset_name":    r.Asset.name,
+            "region":        r.Asset.region,
+            "risk_prob":     r.RiskScore.risk_probability if r.RiskScore else None,
+            "risk_level":    r.RiskScore.risk_level       if r.RiskScore else None,
+            "criticality":   r.Asset.criticality,
+            "calculated_at": r.RiskScore.calculated_at.isoformat() if r.RiskScore else None,
         }
         for r in rows
     ]
@@ -1034,6 +1257,7 @@ def sensor_history(asset_id: int, hours: int = 24, db: Session = Depends(get_db)
         }
         for r in rows
     ]
+
 
 
 @simulation_router.post("/speed")

@@ -109,8 +109,12 @@ class AssetDetail(AssetOut):
     repairs_count: Optional[int] = 0                   # всего ремонтов
     latest_inspection_score: Optional[int] = None      # последняя оценка осмотра 1..5
     days_since_maintenance: Optional[float] = None     # дней с последнего ТО
-    latest_risk_probability: Optional[float] = None    # текущая вероятность отказа
+    latest_risk_probability: Optional[float] = None    # текущая вероятность отказа (со скидкой за свежее ТО)
     latest_risk_level: Optional[str] = None            # low/medium/high
+    latest_risk_probability_raw: Optional[float] = None   # модельная оценка без скидки
+    latest_risk_recency_factor: Optional[float] = None    # применённый коэффициент 0..1
+    previous_risk_probability: Optional[float] = None     # предыдущий риск (для отрисовки «было → стало»)
+    previous_risk_calculated_at: Optional[datetime] = None
     health_score: Optional[float] = None               # балл здоровья из digital twin 0..100
 
 
@@ -257,6 +261,8 @@ class MaintenancePlanOut(BaseModel):
     status: str                               # scheduled/completed/cancelled
     notes: Optional[str]
     auto_generated: bool                      # True = создано алгоритмом
+    created_at: Optional[datetime] = None     # когда сгенерирована запись плана
+    current_risk_probability: Optional[float] = None  # актуальный ML-риск объекта (для сравнения с notes)
 
     class Config:
         from_attributes = True
